@@ -1,9 +1,9 @@
 import os
+import sys
 import pandas as pd
 import numpy as np
 import json
 import time
-import requests
 from typing import List, Dict
 from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
 import matplotlib.pyplot as plt
@@ -12,13 +12,15 @@ from tqdm import tqdm
 import warnings
 warnings.filterwarnings('ignore')
 
+# 添加src路径到sys.path
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
+from llm_api import LLMAPIClient
+from diagnosis_models import DiagnosisResult, DiagnosisCategory
+
 class Qwen3ZeroShot:
     def __init__(self, api_base="http://127.0.0.1:9019/v1", model_name="/tcci_mnt/shihao/models/Qwen3-8B"):
-        self.api_base = api_base
-        self.model_name = model_name
-        self.headers = {
-            "Content-Type": "application/json",
-        }
+        # 初始化LLM API客户端
+        self.llm_client = LLMAPIClient(api_base=api_base, model_name=model_name)
         
         self.label_mapping = {
             0: '抑郁相关', 
@@ -49,26 +51,20 @@ class Qwen3ZeroShot:
             '注意缺陷多动障碍': 3
         }
         
-        # 验证API连接
-        self.test_connection()
+        # 诊断类别到数字的映射
+        self.diagnosis_to_label = {
+            DiagnosisCategory.DEPRESSION: 0,
+            DiagnosisCategory.BIPOLAR: 1,
+            DiagnosisCategory.ANXIETY: 2,
+            DiagnosisCategory.ADHD: 3
+        }
     
-    def test_connection(self):
-        """测试API连接"""
-        try:
-            response = requests.get(f"{self.api_base}/models", headers=self.headers, timeout=10)
-            if response.status_code == 200:
-                print(f"✓ API连接成功: {self.api_base}")
-                print(f"✓ 模型: {self.model_name}")
-            else:
-                print(f"⚠️ API连接警告: 状态码 {response.status_code}")
-        except Exception as e:
-            print(f"❌ API连接失败: {e}")
-            print("请确保Qwen3模型服务正在运行")
+
     
-    def create_prompt(self, dialogue_text):
-        """创建用于诊断分类的提示"""
+    def create_diagnosis_message(self, dialogue_text):
+        """创建用于诊断分类的用户消息"""
         
-        prompt = f"""你是一位专业的精神科医生，请根据以下医患对话内容，判断患者最可能的精神疾病诊断类别。
+        message = f"""请根据以下医患对话内容进行精神疾病诊断分类：
 
 对话内容：
 {dialogue_text}
@@ -79,61 +75,15 @@ class Qwen3ZeroShot:
 3. 焦虑相关 - 包括广泛性焦虑障碍等以焦虑症状为主的疾病
 4. 多动障碍 - 包括注意缺陷多动障碍(ADHD)等注意力和行为问题
 
-要求：
+分析要求：
 1. 仔细分析对话中患者的症状描述
 2. 考虑症状的严重程度、持续时间和功能影响
-3. 只输出一个类别名称，如："抑郁相关"、"双相情感障碍"、"焦虑相关"或"多动障碍"
-4. 不要输出其他解释或分析
-
-诊断类别："""
+3. 提供诊断推理过程
+4. 识别关键症状
+5. 给出置信度评估（0-1之间）"""
         
-        return prompt
+        return message
     
-    def call_api(self, prompt, max_retries=3, retry_delay=1):
-        """调用Qwen3 API"""
-        
-        data = {
-            "model": self.model_name,
-            "messages": [
-                {
-                    "role": "user", 
-                    "content": prompt
-                }
-            ],
-            "temperature": 0.1,  # 低温度保证输出稳定
-            "max_tokens": 50,
-            "top_p": 0.9
-        }
-        
-        for attempt in range(max_retries):
-            try:
-                response = requests.post(
-                    f"{self.api_base}/chat/completions",
-                    headers=self.headers,
-                    json=data,
-                    timeout=30
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    if 'choices' in result and len(result['choices']) > 0:
-                        content = result['choices'][0]['message']['content'].strip()
-                        return content
-                    else:
-                        print(f"API响应格式错误: {result}")
-                        
-                else:
-                    print(f"API请求失败: 状态码 {response.status_code}")
-                    print(f"响应内容: {response.text}")
-                    
-            except Exception as e:
-                print(f"API调用异常 (尝试 {attempt + 1}/{max_retries}): {e}")
-                
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay)
-                retry_delay *= 2  # 指数退避
-        
-        return None
     
     def parse_prediction(self, response_text):
         """解析模型输出，映射为数字标签"""
@@ -199,23 +149,35 @@ class Qwen3ZeroShot:
         
         total = len(texts)
         
+        # 系统消息
+        system_message = "你是一位专业的精神科医生，请根据医患对话内容进行精神疾病诊断分类。"
+        
         for i in tqdm(range(start_idx, total), desc="Zero-shot预测"):
             text = texts[i]
             
-            # 创建提示
-            prompt = self.create_prompt(text)
+            # 创建用户消息
+            user_message = self.create_diagnosis_message(text)
             
-            # 调用API
-            response = self.call_api(prompt)
+            # 调用结构化API
+            diagnosis_result = self.llm_client.call_with_structured_output(
+                user_message=user_message,
+                output_schema=DiagnosisResult,
+                system_message=system_message,
+                temperature=0.1,
+                max_tokens=300,
+                max_retries=3
+            )
             
-            if response:
-                # 解析预测结果
-                pred_label = self.parse_prediction(response)
+            if diagnosis_result:
+                # 将诊断类别转换为数字标签
+                pred_label = self.diagnosis_to_label[diagnosis_result.category]
                 predictions.append({
                     'index': i,
                     'prediction': pred_label,
-                    'response': response,
-                    'confidence': 1.0  # Zero-shot默认置信度
+                    'response': diagnosis_result.category.value,
+                    'confidence': diagnosis_result.confidence,
+                    'reasoning': diagnosis_result.reasoning,
+                    'key_symptoms': diagnosis_result.key_symptoms
                 })
             else:
                 failed_indices.append(i)
@@ -223,7 +185,9 @@ class Qwen3ZeroShot:
                     'index': i,
                     'prediction': 3,  # 默认标签
                     'response': None,
-                    'confidence': 0.0
+                    'confidence': 0.0,
+                    'reasoning': None,
+                    'key_symptoms': []
                 })
             
             # 定期保存进度
@@ -285,6 +249,8 @@ class Qwen3ZeroShot:
         results_df['predicted_class'] = [self.label_mapping[pred] for pred in y_pred]
         results_df['qwen3_response'] = [item['response'] for item in predictions_data]
         results_df['confidence'] = [item['confidence'] for item in predictions_data]
+        results_df['reasoning'] = [item.get('reasoning', '') for item in predictions_data]
+        results_df['key_symptoms'] = [str(item.get('key_symptoms', [])) for item in predictions_data]
         
         os.makedirs('results', exist_ok=True)
         results_df.to_csv('results/qwen3_detailed_results.csv', index=False, encoding='utf-8')
@@ -319,19 +285,32 @@ class Qwen3ZeroShot:
         if isinstance(texts, str):
             texts = [texts]
         
+        system_message = "你是一位专业的精神科医生，请根据医患对话内容进行精神疾病诊断分类。"
         results = []
+        
         for text in texts:
-            prompt = self.create_prompt(text)
-            response = self.call_api(prompt)
+            user_message = self.create_diagnosis_message(text)
             
-            if response:
-                pred_label = self.parse_prediction(response)
+            # 调用结构化API
+            diagnosis_result = self.llm_client.call_with_structured_output(
+                user_message=user_message,
+                output_schema=DiagnosisResult,
+                system_message=system_message,
+                temperature=0.1,
+                max_tokens=300,
+                max_retries=3
+            )
+            
+            if diagnosis_result:
+                pred_label = self.diagnosis_to_label[diagnosis_result.category]
                 results.append({
                     'text': text,
                     'predicted_label': pred_label,
-                    'predicted_class': self.label_mapping[pred_label],
-                    'raw_response': response,
-                    'confidence': 1.0
+                    'predicted_class': diagnosis_result.category.value,
+                    'raw_response': diagnosis_result.category.value,
+                    'confidence': diagnosis_result.confidence,
+                    'reasoning': diagnosis_result.reasoning,
+                    'key_symptoms': diagnosis_result.key_symptoms
                 })
             else:
                 results.append({
@@ -339,7 +318,9 @@ class Qwen3ZeroShot:
                     'predicted_label': 3,
                     'predicted_class': self.label_mapping[3],
                     'raw_response': None,
-                    'confidence': 0.0
+                    'confidence': 0.0,
+                    'reasoning': None,
+                    'key_symptoms': []
                 })
         
         return results
@@ -406,7 +387,9 @@ def main():
     pred_result = model.predict(sample_text)
     print(f"输入文本: {sample_text[:200]}...")
     print(f"预测结果: {pred_result[0]['predicted_class']}")
-    print(f"原始响应: {pred_result[0]['raw_response']}")
+    print(f"置信度: {pred_result[0]['confidence']}")
+    print(f"推理过程: {pred_result[0]['reasoning']}")
+    print(f"关键症状: {pred_result[0]['key_symptoms']}")
 
 if __name__ == "__main__":
     main() 

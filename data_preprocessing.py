@@ -8,7 +8,7 @@ from collections import Counter
 import re
 
 class DataPreprocessor:
-    def __init__(self, data_dir='DataSyn'):
+    def __init__(self, data_dir='DiagnosisData'):
         self.data_dir = data_dir
         # 定义4类疾病的关键词映射
         self.label_mapping = {
@@ -24,17 +24,6 @@ class DataPreprocessor:
             3: ['多动']  # 多动障碍
         }
         
-    def extract_patient_id(self, filename):
-        """从文件名提取patient_id"""
-        # 文件格式: patient_10004com4_4_dialogue3_dialogue1_2.json
-        parts = filename.split('_')
-        if len(parts) >= 2:
-            # 先得到10004com4，然后用com分割取第一部分10004
-            patient_com = parts[1]  # 得到10004com4
-            patient_id = patient_com.split('com')[0]  # 得到10004
-            return patient_id
-        return None
-    
     def diagnosis_to_multilabel(self, diagnosis_text):
         """将诊断文本转换为多标签one-hot编码"""
         # 初始化4类标签为0
@@ -68,17 +57,20 @@ class DataPreprocessor:
             if not filename.endswith('.json'):
                 continue
                 
-            patient_id = self.extract_patient_id(filename)
-            if not patient_id:
-                continue
-                
             try:
                 with open(os.path.join(self.data_dir, filename), 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     
+                # 直接从JSON中获取patient_id和诊断结果
+                patient_id = data.get('patient_id')
+                diagnosis_text = data.get('diagnosis_result')
+                
+                if not patient_id or not diagnosis_text:
+                    print(f"跳过文件 {filename}: 缺少patient_id或diagnosis_result")
+                    continue
+                    
                 # 提取对话文本
                 conversations = []
-                diagnosis_text = None
                 
                 for conv in data.get('conversation', []):
                     if isinstance(conv, dict):
@@ -86,12 +78,8 @@ class DataPreprocessor:
                             # 普通对话
                             conversations.append(f"医生: {conv['doctor']}")
                             conversations.append(f"患者: {conv['patient']}")
-                        elif 'doctor' in conv and '诊断结束' in conv['doctor']:
-                            # 诊断结果
-                            diagnosis_text = conv['doctor'].replace('诊断结束，你的诊断结果为：', '').replace('。', '').strip()
-                            break
                 
-                if diagnosis_text is not None and conversations:
+                if conversations:
                     # 合并对话文本
                     full_text = '\n'.join(conversations)
                     
@@ -99,7 +87,7 @@ class DataPreprocessor:
                     multilabels = self.diagnosis_to_multilabel(diagnosis_text)
                     
                     data_list.append({
-                        'patient_id': patient_id,
+                        'patient_id': str(patient_id),
                         'filename': filename,
                         'text': full_text,
                         'labels': multilabels,  # 多标签列表
