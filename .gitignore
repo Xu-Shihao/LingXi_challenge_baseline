@@ -1,0 +1,14 @@
+DiagnosisData/
+DataSyn/
+results/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+.DS_Store
+processed_data/
+models/saved/
+models/__pycache__/
+*.zip
